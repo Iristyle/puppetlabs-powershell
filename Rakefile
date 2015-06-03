@@ -26,3 +26,11 @@ RSpec::Core::RakeTask.new('beaker:rspec:test:git',:host) do |t,args|
   t.rspec_opts = '--color'
   t.verbose = true
 end
+
+RSpec::Core::RakeTask.new('beaker:rspec:test:puppet-agent', :host) do |t,args|
+  args.with_defaults({:host => 'default', :type => 'aio'})
+  ENV['BEAKER_set'] = args[:host]
+  t.pattern = 'spec/acceptance'
+  t.rspec_opts = '--color'
+  t.verbose = true
+end
