@@ -11,8 +11,8 @@ module PuppetX
 
       @@instances = {}
 
-      def self.instance(cmd)
-        @@instances[:cmd] ||= PowerShellManager.new(cmd)
+      def self.instance(cmd, init_ready_event_name, named_pipe_name)
+        @@instances[cmd] ||= PowerShellManager.new(cmd, init_ready_event_name, named_pipe_name)
       end
 
       def self.win32console_enabled?
@@ -25,16 +25,23 @@ module PuppetX
         Puppet::Util::Platform.windows? && !win32console_enabled?
       end
 
-      def initialize(cmd)
-        @stdin, @stdout, @stderr, @ps_process = Open3.popen3(cmd)
+      def initialize(cmd, init_ready_event_name, named_pipe_name)
+        # create the event for PS to signal once the pipe server is ready
+        init_ready_event = self.class.create_event(init_ready_event_name)
+
+        # @stdin, @stdout, @stderr, @ps_process = Open3.popen3(cmd)
+        @stdout, @ps_process = Open3.pipeline_r(cmd)
 
         Puppet.debug "#{Time.now} #{cmd} is running as pid: #{@ps_process[:pid]}"
 
-        init_ready_event_name =  "Global\\#{SecureRandom.uuid}"
-        init_ready_event = self.class.create_event(init_ready_event_name)
+        # wait for the pipe server to signal ready, and fail if no response in 10 seconds
+        ps_pipe_wait_ms = 10 * 1000
+        if WAIT_TIMEOUT == self.class.wait_on(init_ready_event, ps_pipe_wait_ms)
+          msg = 'Failure waiting for PowerShell process #{@ps_process[:pid]} to start pipe server'
+          raise Puppet::Util::Windows::Error.new(msg)
+        end
 
-        code = make_ps_init_code(init_ready_event_name)
-        out, err = exec_read_result(code, init_ready_event)
+        @pipe = File.open("\\\\.\\pipe\\#{named_pipe_name}" , 'r+')
 
         Puppet.debug "#{Time.now} PowerShell initialization complete for pid: #{@ps_process[:pid]}"
 
@@ -47,7 +54,7 @@ module PuppetX
 
         code = make_ps_code(powershell_code, output_ready_event_name, timeout_ms)
 
-        out, err = exec_read_result(code, output_ready_event)
+        out = exec_read_result(code, output_ready_event)
 
         # Powershell adds in newline characters as it tries to wrap output around the display (by default 80 chars).
         # This behavior is expected and cannot be changed, however it corrupts the XML e.g. newlines in the middle of
@@ -63,7 +70,6 @@ module PuppetX
             (prop.text.nil? ? nil : Base64.decode64(prop.text))
           [name.to_sym, value]
         end
-        props << [:stderr, err]
 
         Hash[ props ]
       ensure
@@ -72,10 +78,10 @@ module PuppetX
 
       def exit
         Puppet.debug "PowerShellManager exiting..."
-        @stdin.puts "\nexit\n"
-        @stdin.close
+        # @stdin.puts "\nexit\n"
+        # @stdin.close
         @stdout.close
-        @stderr.close
+        # @stderr.close
 
         exit_msg = "PowerShell process did not terminate in reasonable time"
         begin
@@ -94,15 +100,16 @@ module PuppetX
         end
       end
 
-      def template_path
-        File.expand_path('../../../templates', __FILE__)
+      def self.init_path
+        path = File.expand_path('../../../templates', __FILE__)
+        path = File.join(path, 'init_ps.ps1').gsub('/', '\\')
+        "\"#{path}\""
       end
 
-      def make_ps_init_code(init_ready_event_name)
-        template_file = File.new(template_path + "/init_ps.ps1.erb").read
-        template = ERB.new(template_file, nil, '-')
-        template.result(binding)
-      end
+      # def template_path
+      #   File.expand_path('../../../templates', __FILE__)
+      # end
+
 
       def make_ps_code(powershell_code, output_ready_event_name, timeout_ms = 300 * 1000)
         <<-CODE
@@ -189,10 +196,26 @@ Invoke-PowerShellUserCode @params
         wait_result
       end
 
-      def write_stdin(input)
-        @stdin.puts(input)
+      # Message format is:
+      # 1 byte - command identifier
+      #     0 - Exit
+      #     1 - Execute
+      # 4 bytes - Big Endian encoded 32-bit message length
+      # variable length - parameter block
+      def build_pipe_message(command, data = nil)
+        case command
+        when :exit
+          return [0]
+        when :execute
+          encoded = data.encode(Encoding::UTF_8)
+        end
+      end
+
+      def write_pipe(input)
+        @pipe.puts(input)
+        @pipe.flush
       rescue => e
-        msg = "Error writing STDIN / reading STDOUT: #{e}"
+        msg = "Error writing pipe: #{e}"
         raise Puppet::Util::Windows::Error.new(msg)
       end
 
@@ -207,40 +230,31 @@ Invoke-PowerShellUserCode @params
         output
       end
 
-      def read_stdout(output_ready_event, wait_interval_ms = 50)
+      def read_pipe(output_ready_event, wait_interval_ms = 50)
         output = []
-        errors = []
         waited = 0
 
         # drain the pipe while waiting for the event signal
         while WAIT_TIMEOUT == self.class.wait_on(output_ready_event, wait_interval_ms)
-          # TODO: While this does ensure that both pipes have been
-          # drained it can block on either longer than necessary or
-          # deadlock waiting for one or the other to finish. The correct
-          # way to deal with this is to drain each pipe from seperate threads
-          # but time ran on in this implementation and this will be addressed soon
-          output << drain_pipe(@stdout)
-          errors << drain_pipe(@stderr)
+          output << drain_pipe(@pipe)
           waited += wait_interval_ms
         end
 
         Puppet.debug "Waited #{waited} total milliseconds."
 
         # once signaled, ensure everything has been drained
-        output << drain_pipe(@stdout, 1000)
-        errors << drain_pipe(@stderr, 1000)
+        output << drain_pipe(@pipe, 1000)
 
-        errors = errors.reject { |e| e.empty? }
-
-        return output.join(''), errors
+        return output.join('')
       rescue => e
         msg = "Error reading PIPE: #{e}"
         raise Puppet::Util::Windows::Error.new(msg)
       end
 
       def exec_read_result(powershell_code, output_ready_event)
-        write_stdin(powershell_code)
-        read_stdout(output_ready_event)
+
+        write_pipe(powershell_code)
+        read_pipe(output_ready_event)
       end
 
       if Puppet::Util::Platform.windows?

@@ -1,3 +1,15 @@
+[CmdletBinding()]
+param (
+  [Parameter(Mandatory = $true)]
+  [String]
+  $InitReadyEventName,
+
+  [Parameter(Mandatory = $true)]
+  [String]
+  $NamedPipeName
+)
+
+
 $hostSource = @"
 using System;
 using System.Collections.Generic;
@@ -480,10 +492,180 @@ function Invoke-PowerShellUserCode
   }
 }
 
+function Write-StreamResponse
+{
+  [CmdletBinding()]
+  param (
+    [IO.StreamWriter]
+    $PipeWriter
 
-$event = [Threading.EventWaitHandle]::OpenExisting('<%= init_ready_event_name %>')
-[Void]$event.Set()
-[Void]$event.Close()
-if ($PSVersionTable.CLRVersion.Major -ge 3) {
-  [Void]$event.Dispose()
+    [String]
+    $Response
+  )
+
+  # TODO: this should just pull a simple write, but does it need to buffer? I think reading side is responsible for draining
+  # TODO: need to length prefix the data coming back for the reader side
+  # TODO: orrrr... this is already base64 encoded, so...
+  $PipeWriter.Write($Response)
+  $PipeWriter.Flush()
+}
+
+# returns a parameter hash based on raw data
+# 4 bytes - number of parameters
+#
+# for each parameters:
+# 4 bytes - Big Endian encoded 32-bit parameter value name
+# 4 bytes - Big Endian encoded 32-bit parameter value length
+# variable length - parameter name
+# variable length - parameter data
+function ConvertTo-Parameters
+{
+  [CmdletBinding()]
+  param (
+    [Parameter(Mandatory = $true)]
+    [Char[]]
+    $Data
+  )
+
+  $params = @{}
+  $count = [BitConverter]::ToInt32($Data[0..3], 0)
+  $offset = 4
+
+  # parse out all the parameters individually
+  1..$count |
+    % {
+      # first field of parameter, 4 byte (32-bit) length of name
+      $nameLength = [BitConverter]::ToInt32($Data[$offset..($offset + 4)], 0)
+      $offset += 4
+
+      # second field of parameter, 4 byte (32-bit) length of value
+      $valueLength = [BitConverter]::ToInt32($Data[$offset..($offset + 4)], 0)
+      $offset += 4
+
+      # third filed of parameter, variable length name
+      $name = $Data[$offset..($offset + $nameLength - 1)] -join ''
+      $offset += $nameLength
+
+      # fourth field of parameter, variable length data
+      $params.$name = $Data[$offset..($offset + $valueLength)] -join ''
+      $offset += $valueLength
+    }
+
+  $params
+}
+
+# Message format is:
+# 1 byte - command identifier
+#     0 - Exit
+#     1 - Execute
+# 4 bytes - Big Endian encoded 32-bit message length
+# variable length - parameter block
+function Read-Stream
+{
+  [CmdletBinding()]
+  param (
+
+    [Parameter(Mandatory = $true)]
+    [IO.StreamReader]
+    $PipeReader
+  )
+
+  # command identifier is a single value
+  $command = $PipeReader.Read()
+  switch ($command)
+  {
+    # Exit
+    0 { return @{ Command = 'Exit' }}
+
+    # Execute
+    1 { $parsed = @{ Command = 'Execute' } }
+
+    default { throw "Unexpected command identifier: $command" }
+  }
+
+  # process the pipe more, given that this is an Execute
+  $length = New-Object Byte[] 4
+  $PipeReader.ReadBlock(0, 4, $length) | Out-Null
+
+  # determine the length of user data and allocate a place to hold it
+  $parsed.Length = [BitConverter]::ToInt32($length, 0)
+  $parsed.RawData = New-Object Byte[] $length
+
+  # keep draining pipe in 2048 byte chunks until expected number of bytes read
+  $chunkLength = 2048
+  $read = 0
+  $buffer = New-Object Byte[] 2048
+  while ($read -lt $parsed.Length)
+  {
+    # ensure that only expected bytes are waited on
+    $toRead = [Math]::Min(($parsed.Length - $read), 2048)
+
+    # this should return either the buffer length or length of last few bytes
+    $lastRead += $PipeReader.ReadBlock(0, $toRead, $buffer)
+
+    # copy the $lastRead number of bytes read into $buffer out to RawData
+    [Array]::Copy($buffer, 0, $parsed.RawData, $read, $lastRead)
+
+    # and keep track of total bytes read
+    $read += $lastRead
+  }
+
+  # take the raw data and parse it into a data structure
+  $parsed.Parameters = ConvertTo-Parameters -Data $parsed.RawData
+
+  return $parsed
+}
+
+# this does not require versioning in the payload as client / server are tightly coupled
+$server = New-Object IO.Pipes.NamedPipeServerStream($NamedPipeName [IO.Pipes.PipeDirection]::InOut)
+
+try
+{
+  # let Ruby know the server is available and listening, and the file path can be opened
+  $event = [Threading.EventWaitHandle]::OpenExisting($InitReadyEventName)
+  [Void]$event.Set()
+  [Void]$event.Close()
+  if ($PSVersionTable.CLRVersion.Major -ge 3) {
+    [Void]$event.Dispose()
+  }
+
+  # block until Ruby process connects
+  $server.WaitForConnection()
+
+  $pipeReader = New-Object System.IO.StreamReader($server)
+  $pipeWriter = New-Object System.IO.StreamWriter($server)
+  # $pipeWriter.AutoFlush = $true
+
+  # Infinite Loop to process commands until EXIT received
+  $running = $true
+  while ($running)
+  {
+    $response = Read-Stream -PipeReader $pipeReader
+
+    switch ($response.Command)
+    {
+      'Execute' {
+        $foo = $param.Code
+        $result = & $foo
+        $params = @{
+          Code = $response.Parameters.Code
+          # TODO: not sure if this is true?
+          # TODO: Ruby side should no longer need to wait on an event - just block until pipe is ready, then read specified number of bytes
+          EventName = $response.Parameters.EventName # "#{output_ready_event_name}"
+          TimeoutMilliseconds = $response.Parameters.TimeoutMilliseconds  #{timeout_ms}
+        }
+
+        # result is already returned as XML
+        $result = Invoke-PowerShellUserCode @params
+
+        # TODO: write a generic message out to the pipe
+        Write-StreamResponse -Data $result
+      }
+      'Exit' { $running = $false }
+    }
+  }
+}
+finally
+{
+  $server.Dispose()
 }

@@ -43,14 +43,30 @@ Puppet::Type.type(:exec).provide :powershell, :parent => Puppet::Provider::Exec 
     @upgrade_warning_issued = true
   end
 
-  def self.powershell_args
-    ps_args = ['-NoProfile', '-NonInteractive', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-Command']
-    ps_args << '-' if PuppetX::PowerShell::PowerShellManager.supported?
+  def self.powershell_args(event_name)
+    ps_args = ['-NoProfile', '-NonInteractive', '-NoLogo', '-ExecutionPolicy', 'Bypass']
+    if PuppetX::PowerShell::PowerShellManager.supported?
+      ps_args << '-File' << PuppetX::PowerShell::PowerShellManager.init_path << "\"#{event_name}\""
+    else
+      ps_args << '-Command'
+    end
+
     ps_args
   end
 
+  def self.init_event_name
+    @init_event_name ||= "Global\\#{SecureRandom.uuid}"
+  end
+
+  def self.named_pipe_name
+    @named_pipe_name ||= "#{SecureRandom.uuid}PuppetPsHost"
+  end
+
   def ps_manager
-    PuppetX::PowerShell::PowerShellManager.instance("#{command(:powershell)} #{self.class.powershell_args.join(' ')}")
+    cli_args = self.class.powershell_args(self.class.init_event_name, self.class.named_pipe_name)
+
+    manager_args = "#{command(:powershell)} #{cli_args.join(' ')}"
+    PuppetX::PowerShell::PowerShellManager.instance(manager_args, self.class.init_event_name, self.class.named_pipe_name)
   end
 
   def run(command, check = false)

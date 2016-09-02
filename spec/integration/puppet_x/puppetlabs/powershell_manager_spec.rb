@@ -14,8 +14,13 @@ describe PuppetX::PowerShell::PowerShellManager,
   let (:manager) {
     provider = Puppet::Type.type(:exec).provider(:powershell)
     powershell = provider.command(:powershell)
-    powershell_args = provider.powershell_args
-    PuppetX::PowerShell::PowerShellManager.instance("#{powershell} #{powershell_args.join(' ')}")
+
+    event_name = "Global\\#{SecureRandom.uuid}"
+    cli_args = provider.powershell_args(event_name)
+    manager_args = "#{powershell} #{cli_args.join(' ')}"
+
+    require 'pry'; binding.pry
+    PuppetX::PowerShell::PowerShellManager.instance(manager_args, event_name)
   }
 
   describe "when provided powershell commands" do
