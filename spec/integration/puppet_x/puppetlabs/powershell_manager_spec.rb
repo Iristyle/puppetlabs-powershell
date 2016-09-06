@@ -11,16 +11,17 @@ end
 describe PuppetX::PowerShell::PowerShellManager,
   :if => Puppet::Util::Platform.windows? && PuppetX::PowerShell::PowerShellManager.supported? do
 
+  EVENT_NAME = "Global\\#{SecureRandom.uuid}"
+  NAMED_PIPE_NAME = "#{SecureRandom.uuid}-PowerShellManagerSpec"
+
   let (:manager) {
     provider = Puppet::Type.type(:exec).provider(:powershell)
     powershell = provider.command(:powershell)
 
-    event_name = "Global\\#{SecureRandom.uuid}"
-    named_pipe_name = "#{SecureRandom.uuid}-PowerShellManagerSpec"
-    cli_args = provider.powershell_args(event_name, named_pipe_name)
+    cli_args = provider.powershell_args(EVENT_NAME, NAMED_PIPE_NAME)
     manager_args = "#{powershell} #{cli_args.join(' ')}"
 
-    PuppetX::PowerShell::PowerShellManager.instance(manager_args, event_name, named_pipe_name)
+    PuppetX::PowerShell::PowerShellManager.instance(manager_args, EVENT_NAME, NAMED_PIPE_NAME)
   }
 
   describe "when provided powershell commands" do

@@ -29,16 +29,16 @@ module PuppetX
         # create the event for PS to signal once the pipe server is ready
         init_ready_event = self.class.create_event(init_ready_event_name)
 
-        # @stdin, @stdout, @stderr, @ps_process = Open3.popen3(cmd)
-        @stdout, threads = Open3.pipeline_r(cmd)
-        @ps_process = threads[0]
+        @stdin, @stdout, @stderr, @ps_process = Open3.popen3(cmd)
+        # @stdout, threads = Open3.pipeline_r(cmd)
+        # @ps_process = threads[0]
 
         Puppet.debug "#{Time.now} #{cmd} is running as pid: #{@ps_process[:pid]}"
 
         # wait for the pipe server to signal ready, and fail if no response in 10 seconds
         ps_pipe_wait_ms = 10 * 1000
         if WAIT_TIMEOUT == self.class.wait_on(init_ready_event, ps_pipe_wait_ms)
-          msg = 'Failure waiting for PowerShell process #{@ps_process[:pid]} to start pipe server'
+          msg = "Failure waiting for PowerShell process #{@ps_process[:pid]} to start pipe server"
           raise Puppet::Util::Windows::Error.new(msg)
         end
 
@@ -54,7 +54,7 @@ module PuppetX
         output_ready_event = self.class.create_event(output_ready_event_name)
 
         code = make_ps_code(powershell_code, output_ready_event_name, timeout_ms)
-        out = exec_read_result(code, output_ready_event)
+        out, err = exec_read_result(code, output_ready_event)
 
         # Powershell adds in newline characters as it tries to wrap output around the display (by default 80 chars).
         # This behavior is expected and cannot be changed, however it corrupts the XML e.g. newlines in the middle of
@@ -70,6 +70,7 @@ module PuppetX
             (prop.text.nil? ? nil : Base64.decode64(prop.text))
           [name.to_sym, value]
         end
+        props << [:stderr, err]
 
         Hash[ props ]
       ensure
@@ -79,7 +80,9 @@ module PuppetX
       def exit
         Puppet.debug "PowerShellManager exiting..."
         write_pipe(pipe_command(:exit))
+        @stdin.close
         @stdout.close
+        @stderr.close
 
         exit_msg = "PowerShell process did not terminate in reasonable time"
         begin
@@ -238,11 +241,13 @@ Invoke-PowerShellUserCode @params
 
       def read_pipe(output_ready_event, wait_interval_ms = 50)
         output = []
+        errors = []
         waited = 0
 
         # drain the pipe while waiting for the event signal
         while WAIT_TIMEOUT == self.class.wait_on(output_ready_event, wait_interval_ms)
           output << drain_pipe(@pipe)
+          errors << drain_pipe(@stderr)
           waited += wait_interval_ms
         end
 
@@ -250,8 +255,11 @@ Invoke-PowerShellUserCode @params
 
         # once signaled, ensure everything has been drained
         output << drain_pipe(@pipe, 1000)
+        errors << drain_pipe(@stderr, 1000)
 
-        return output.join('')
+        errors = errors.reject { |e| e.empty? }
+
+        return output.join(''), errors
       rescue => e
         msg = "Error reading PIPE: #{e}"
         raise Puppet::Util::Windows::Error.new(msg)
