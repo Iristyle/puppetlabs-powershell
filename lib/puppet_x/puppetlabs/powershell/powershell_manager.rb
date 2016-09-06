@@ -30,7 +30,8 @@ module PuppetX
         init_ready_event = self.class.create_event(init_ready_event_name)
 
         # @stdin, @stdout, @stderr, @ps_process = Open3.popen3(cmd)
-        @stdout, @ps_process = Open3.pipeline_r(cmd)
+        @stdout, threads = Open3.pipeline_r(cmd)
+        @ps_process = threads[0]
 
         Puppet.debug "#{Time.now} #{cmd} is running as pid: #{@ps_process[:pid]}"
 
@@ -53,7 +54,6 @@ module PuppetX
         output_ready_event = self.class.create_event(output_ready_event_name)
 
         code = make_ps_code(powershell_code, output_ready_event_name, timeout_ms)
-
         out = exec_read_result(code, output_ready_event)
 
         # Powershell adds in newline characters as it tries to wrap output around the display (by default 80 chars).
@@ -78,10 +78,8 @@ module PuppetX
 
       def exit
         Puppet.debug "PowerShellManager exiting..."
-        # @stdin.puts "\nexit\n"
-        # @stdin.close
+        write_pipe(pipe_command(:exit))
         @stdout.close
-        # @stderr.close
 
         exit_msg = "PowerShell process did not terminate in reasonable time"
         begin
@@ -101,15 +99,11 @@ module PuppetX
       end
 
       def self.init_path
+        # a PowerShell -File compatible path to bootstrap the instance
         path = File.expand_path('../../../templates', __FILE__)
         path = File.join(path, 'init_ps.ps1').gsub('/', '\\')
         "\"#{path}\""
       end
-
-      # def template_path
-      #   File.expand_path('../../../templates', __FILE__)
-      # end
-
 
       def make_ps_code(powershell_code, output_ready_event_name, timeout_ms = 300 * 1000)
         <<-CODE
@@ -196,24 +190,36 @@ Invoke-PowerShellUserCode @params
         wait_result
       end
 
-      # Message format is:
-      # 1 byte - command identifier
+      # 1 char - command identifier
       #     0 - Exit
       #     1 - Execute
-      # 4 bytes - Big Endian encoded 32-bit message length
-      # variable length - parameter block
-      def build_pipe_message(command, data = nil)
+      def pipe_command(command)
         case command
         when :exit
-          return [0]
+          return "0\n"
         when :execute
-          encoded = data.encode(Encoding::UTF_8)
+          return "1\n"
+        else
+          # TODO: better error message
+          raise Puppet::Util::Windows::Error.new('foo')
         end
       end
 
+      def pipe_data(data)
+        # raw_message = data.encode(Encoding::UTF_8).bytes.to_a
+        # # iterate with each, appending to front of buffer in reverse order, which is what .NET expects
+        # [raw_message.length].pack('N').bytes.each { |b| raw_message.insert(0, b) }
+        # raw_message.insert(0, 1)
+
+        # raw_message
+        msg = data.encode(Encoding::UTF_8) + "\n"
+
+        "#{msg.length}\n" + msg
+      end
+
       def write_pipe(input)
-        @pipe.puts(input)
-        @pipe.flush
+        @pipe.write(input)
+        @pipe.flush()
       rescue => e
         msg = "Error writing pipe: #{e}"
         raise Puppet::Util::Windows::Error.new(msg)
@@ -252,8 +258,8 @@ Invoke-PowerShellUserCode @params
       end
 
       def exec_read_result(powershell_code, output_ready_event)
-
-        write_pipe(powershell_code)
+        write_pipe(pipe_command(:execute))
+        write_pipe(pipe_data(powershell_code))
         read_pipe(output_ready_event)
       end
 

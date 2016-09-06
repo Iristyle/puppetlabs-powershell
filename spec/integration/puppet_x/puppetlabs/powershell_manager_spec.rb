@@ -16,11 +16,11 @@ describe PuppetX::PowerShell::PowerShellManager,
     powershell = provider.command(:powershell)
 
     event_name = "Global\\#{SecureRandom.uuid}"
-    cli_args = provider.powershell_args(event_name)
+    named_pipe_name = "#{SecureRandom.uuid}-PowerShellManagerSpec"
+    cli_args = provider.powershell_args(event_name, named_pipe_name)
     manager_args = "#{powershell} #{cli_args.join(' ')}"
 
-    require 'pry'; binding.pry
-    PuppetX::PowerShell::PowerShellManager.instance(manager_args, event_name)
+    PuppetX::PowerShell::PowerShellManager.instance(manager_args, event_name, named_pipe_name)
   }
 
   describe "when provided powershell commands" do

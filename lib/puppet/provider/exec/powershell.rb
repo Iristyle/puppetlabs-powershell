@@ -43,10 +43,10 @@ Puppet::Type.type(:exec).provide :powershell, :parent => Puppet::Provider::Exec 
     @upgrade_warning_issued = true
   end
 
-  def self.powershell_args(event_name)
+  def self.powershell_args(event_name, named_pipe_name)
     ps_args = ['-NoProfile', '-NonInteractive', '-NoLogo', '-ExecutionPolicy', 'Bypass']
     if PuppetX::PowerShell::PowerShellManager.supported?
-      ps_args << '-File' << PuppetX::PowerShell::PowerShellManager.init_path << "\"#{event_name}\""
+      ps_args << '-File' << PuppetX::PowerShell::PowerShellManager.init_path << "\"#{event_name}\"" << "\"#{named_pipe_name}\""
     else
       ps_args << '-Command'
     end

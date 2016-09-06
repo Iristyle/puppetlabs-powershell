@@ -9,7 +9,6 @@ param (
   $NamedPipeName
 )
 
-
 $hostSource = @"
 using System;
 using System.Collections.Generic;
@@ -374,9 +373,6 @@ function Invoke-PowerShellUserCode
     $TimeoutMilliseconds
   )
 
-
-  $event = [System.Threading.EventWaitHandle]::OpenExisting($EventName)
-
   if ($global:runspace -eq $null){
     # CreateDefault2 requires PS3
     if ([System.Management.Automation.Runspaces.InitialSessionState].GetMethod('CreateDefault2')){
@@ -457,7 +453,7 @@ function Invoke-PowerShellUserCode
     [Puppet.PuppetPSHostUserInterface]$ui = $global:puppetPSHost.UI
     [string]$text = $ui.Output
 
-    New-XmlResult -exitcode $global:puppetPSHost.Exitcode -output $text -errormessage $null
+    @((New-XmlResult -exitcode $global:puppetPSHost.Exitcode -output $text -errormessage $null), $EventName)
   }
   catch
   {
@@ -479,87 +475,64 @@ function Invoke-PowerShellUserCode
       $ec = 1
     }
     $output = $_.Exception.Message | Out-String
-    New-XmlResult -exitcode $ec -output $null -errormessage $output
+    @((New-XmlResult -exitcode $ec -output $null -errormessage $output), $EventName)
   }
   finally
   {
-    [Void]$event.Set()
-    [Void]$event.Close()
-    if ($PSVersionTable.CLRVersion.Major -ge 3) {
-      [Void]$event.Dispose()
-    }
     if ($ps -ne $null) { [Void]$ps.Dispose() }
   }
 }
+
+function Signal-Event
+{
+  [CmdletBinding()]
+  param(
+    [String]
+    $EventName
+  )
+
+  $event = [System.Threading.EventWaitHandle]::OpenExisting($EventName)
+
+  [System.Diagnostics.Debug]::WriteLine("Signaling event $EventName")
+
+  [Void]$event.Set()
+  [Void]$event.Close()
+  if ($PSVersionTable.CLRVersion.Major -ge 3) {
+    [Void]$event.Dispose()
+  }
+
+  [System.Diagnostics.Debug]::WriteLine("Signaled event $EventName")
+}
+
 
 function Write-StreamResponse
 {
   [CmdletBinding()]
   param (
+    [Parameter(Mandatory = $true)]
     [IO.StreamWriter]
-    $PipeWriter
+    $PipeWriter,
 
+    [Parameter(Mandatory = $true)]
     [String]
     $Response
   )
 
-  # TODO: this should just pull a simple write, but does it need to buffer? I think reading side is responsible for draining
-  # TODO: need to length prefix the data coming back for the reader side
-  # TODO: orrrr... this is already base64 encoded, so...
-  $PipeWriter.Write($Response)
+  [System.Diagnostics.Debug]::WriteLine("Writing $Response to IO.StreamWriter")
+
+  # this is a simple string write and flush
+  $PipeWriter.WriteLine($Response)
   $PipeWriter.Flush()
-}
 
-# returns a parameter hash based on raw data
-# 4 bytes - number of parameters
-#
-# for each parameters:
-# 4 bytes - Big Endian encoded 32-bit parameter value name
-# 4 bytes - Big Endian encoded 32-bit parameter value length
-# variable length - parameter name
-# variable length - parameter data
-function ConvertTo-Parameters
-{
-  [CmdletBinding()]
-  param (
-    [Parameter(Mandatory = $true)]
-    [Char[]]
-    $Data
-  )
-
-  $params = @{}
-  $count = [BitConverter]::ToInt32($Data[0..3], 0)
-  $offset = 4
-
-  # parse out all the parameters individually
-  1..$count |
-    % {
-      # first field of parameter, 4 byte (32-bit) length of name
-      $nameLength = [BitConverter]::ToInt32($Data[$offset..($offset + 4)], 0)
-      $offset += 4
-
-      # second field of parameter, 4 byte (32-bit) length of value
-      $valueLength = [BitConverter]::ToInt32($Data[$offset..($offset + 4)], 0)
-      $offset += 4
-
-      # third filed of parameter, variable length name
-      $name = $Data[$offset..($offset + $nameLength - 1)] -join ''
-      $offset += $nameLength
-
-      # fourth field of parameter, variable length data
-      $params.$name = $Data[$offset..($offset + $valueLength)] -join ''
-      $offset += $valueLength
-    }
-
-  $params
+  [System.Diagnostics.Debug]::WriteLine("Wrote $Response to IO.StreamWriter")
 }
 
 # Message format is:
 # 1 byte - command identifier
 #     0 - Exit
 #     1 - Execute
-# 4 bytes - Big Endian encoded 32-bit message length
-# variable length - parameter block
+# [optional] 4 bytes - Big Endian encoded 32-bit code block length for execute
+# [optional] variable length - code block
 function Read-Stream
 {
   [CmdletBinding()]
@@ -571,101 +544,135 @@ function Read-Stream
   )
 
   # command identifier is a single value
-  $command = $PipeReader.Read()
+  $command = $PipeReader.ReadLine()
+
+  [System.Diagnostics.Debug]::WriteLine("Command id $command read from pipe")
+
   switch ($command)
   {
     # Exit
-    0 { return @{ Command = 'Exit' }}
+    '0' { return @{ Command = 'Exit' }}
 
     # Execute
-    1 { $parsed = @{ Command = 'Execute' } }
+    '1' { $parsed = @{ Command = 'Execute' } }
 
     default { throw "Unexpected command identifier: $command" }
   }
 
   # process the pipe more, given that this is an Execute
-  $length = New-Object Byte[] 4
-  $PipeReader.ReadBlock(0, 4, $length) | Out-Null
+  $parsed.Length = [Convert]::ToInt32($PipeReader.ReadLine())
 
-  # determine the length of user data and allocate a place to hold it
-  $parsed.Length = [BitConverter]::ToInt32($length, 0)
-  $parsed.RawData = New-Object Byte[] $length
+  # $length = New-Object Byte[] 4
+  # $PipeReader.ReadBlock(0, 4, $length) | Out-Null
 
-  # keep draining pipe in 2048 byte chunks until expected number of bytes read
-  $chunkLength = 2048
+  # # determine the length of user data and allocate a place to hold it
+  # $parsed.Length = [BitConverter]::ToInt32($length, 0)
+  $parsed.RawData = New-Object Char[] $parsed.Length
+
+  [System.Diagnostics.Debug]::WriteLine("Expecting $($parsed.Length) UTF-8 characters")
+
+  # keep draining pipe in 4096 byte chunks until expected number of chars read
+  $chunkLength = 4096
   $read = 0
-  $buffer = New-Object Byte[] 2048
+  $buffer = New-Object Char[] $chunkLength
   while ($read -lt $parsed.Length)
   {
-    # ensure that only expected bytes are waited on
-    $toRead = [Math]::Min(($parsed.Length - $read), 2048)
+    # ensure that only expected chars are waited on
+    $toRead = [Math]::Min(($parsed.Length - $read), $chunkLength)
 
-    # this should return either the buffer length or length of last few bytes
-    $lastRead += $PipeReader.ReadBlock(0, $toRead, $buffer)
+    [System.Diagnostics.Debug]::WriteLine("Attempting to read $toRead UTF-8 characters")
 
-    # copy the $lastRead number of bytes read into $buffer out to RawData
+    # this should return either a full buffer or remaining chars
+    $lastRead += $PipeReader.ReadBlock($buffer, 0, $toRead)
+
+    [System.Diagnostics.Debug]::WriteLine("Buffer received $lastRead UTF-8 characters")
+
+    # copy the $lastRead number of chars read into $buffer out to RawData
     [Array]::Copy($buffer, 0, $parsed.RawData, $read, $lastRead)
 
-    # and keep track of total bytes read
+    # and keep track of total chars read
     $read += $lastRead
   }
 
-  # take the raw data and parse it into a data structure
-  $parsed.Parameters = ConvertTo-Parameters -Data $parsed.RawData
+  [System.Diagnostics.Debug]::WriteLine("Buffer received total $read UTF-8 characters")
+
+  # ensure data is a UTF-8 string
+  $parsed.Code = [System.Text.Encoding]::UTF8.GetString($parsed.RawData)
+
+  [System.Diagnostics.Debug]::WriteLine("User code:`n`n$($parsed.Code)")
 
   return $parsed
 }
 
-# this does not require versioning in the payload as client / server are tightly coupled
-$server = New-Object IO.Pipes.NamedPipeServerStream($NamedPipeName [IO.Pipes.PipeDirection]::InOut)
-
-try
+function Start-PipeServer
 {
-  # let Ruby know the server is available and listening, and the file path can be opened
-  $event = [Threading.EventWaitHandle]::OpenExisting($InitReadyEventName)
-  [Void]$event.Set()
-  [Void]$event.Close()
-  if ($PSVersionTable.CLRVersion.Major -ge 3) {
-    [Void]$event.Dispose()
-  }
+  [CmdletBinding()]
+  param (
+    [Parameter(Mandatory = $true)]
+    [String]
+    $ListenerReadyEventName,
 
-  # block until Ruby process connects
-  $server.WaitForConnection()
+    [Parameter(Mandatory = $true)]
+    [String]
+    $CommandChannelPipeName
+  )
 
-  $pipeReader = New-Object System.IO.StreamReader($server)
-  $pipeWriter = New-Object System.IO.StreamWriter($server)
-  # $pipeWriter.AutoFlush = $true
+  # this does not require versioning in the payload as client / server are tightly coupled
+  $server = New-Object System.IO.Pipes.NamedPipeServerStream($CommandChannelPipeName, [IO.Pipes.PipeDirection]::InOut)
 
-  # Infinite Loop to process commands until EXIT received
-  $running = $true
-  while ($running)
+  try
   {
-    $response = Read-Stream -PipeReader $pipeReader
+    # let Ruby know the server is available and listening, and the file path can be opened
+    Signal-Event -EventName $ListenerReadyEventName
 
-    switch ($response.Command)
+    # block until Ruby process connects
+    $server.WaitForConnection()
+
+    [System.Diagnostics.Debug]::WriteLine("Incoming Connection to $CommandChannelPipeName Received")
+
+    $pipeReader = New-Object System.IO.StreamReader($server, [System.Text.Encoding]::UTF8)
+    $pipeWriter = New-Object System.IO.StreamWriter($server, [System.Text.Encoding]::UTF8)
+
+    [System.Diagnostics.Debug]::WriteLine("Opened Reader / Writer stream against pipe from PS")
+    # $pipeWriter.AutoFlush = $true
+
+    # Infinite Loop to process commands until EXIT received
+    $running = $true
+    while ($running)
     {
-      'Execute' {
-        $foo = $param.Code
-        $result = & $foo
-        $params = @{
-          Code = $response.Parameters.Code
-          # TODO: not sure if this is true?
-          # TODO: Ruby side should no longer need to wait on an event - just block until pipe is ready, then read specified number of bytes
-          EventName = $response.Parameters.EventName # "#{output_ready_event_name}"
-          TimeoutMilliseconds = $response.Parameters.TimeoutMilliseconds  #{timeout_ms}
+      $response = Read-Stream -PipeReader $pipeReader
+
+      [System.Diagnostics.Debug]::WriteLine("Received $($response.Command) command from client")
+
+      switch ($response.Command)
+      {
+        'Execute' {
+          [System.Diagnostics.Debug]::WriteLine("Invoking user code:`n`n $($response.Code)")
+
+          # assuming that the Ruby code always calls Invoked-PowerShellUserCode,
+          # result should already be returned as XML, eventName to signal
+          $result, $eventName = Invoke-Expression $response.Code
+
+          [System.Diagnostics.Debug]::WriteLine("Will signal $eventName after writing to stream execution result:`n$result")
+
+          Write-StreamResponse -PipeWriter $pipeWriter -Response $result
+
+          Signal-Event -EventName $eventName
         }
-
-        # result is already returned as XML
-        $result = Invoke-PowerShellUserCode @params
-
-        # TODO: write a generic message out to the pipe
-        Write-StreamResponse -Data $result
+        'Exit' { $running = $false }
       }
-      'Exit' { $running = $false }
     }
   }
+  catch [Exception]
+  {
+    [System.Diagnostics.Debug]::WriteLine("It died!`n`n$_")
+  }
+  finally
+  {
+    if ($pipeReader -ne $null) { $pipeReader.Dispose() }
+    if ($pipeWriterer -ne $null) { $pipeWriter.Dispose() }
+    if ($server -ne $null) { $server.Dispose() }
+  }
 }
-finally
-{
-  $server.Dispose()
-}
+
+Start-PipeServer -ListenerReadyEventName $InitReadyEventName -CommandChannelPipeName $NamedPipeName
