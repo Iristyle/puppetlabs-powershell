@@ -1,0 +1,14 @@
+{
+  "description": "Adds a new authorized user entry to the OMI server NTLM config file.",
+  "input_method": "environment",
+  "parameters": {
+    "username": {
+      "description": "username",
+      "type": "String"
+    },
+    "password": {
+      "description": "password",
+      "type": "String"
+    }
+  }
+}
