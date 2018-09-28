@@ -1,0 +1,10 @@
+{
+  "description": "Installs PowerShell 6 from deb packages.",
+  "input_method": "environment",
+  "parameters": {
+    "enable_ssh_remoting": {
+      "description": "Configure sshd to allow remoting connections using Enter-PSSession. Enables SSH password authentication.  Default is to enable",
+      "type": "Optional[Boolean]"
+    }
+  }
+}
