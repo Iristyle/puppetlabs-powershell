@@ -2,6 +2,10 @@
   "description": "Installs OMI server with PowerShell provider from deb packages, and enables a winrm endpoint. Requires OpenSSL 1.1.0",
   "input_method": "environment",
   "parameters": {
+    "build_omi": {
+      "description": "Builds OMI server package from source. Default is to use prebuilt packages.",
+      "type": "Optional[Boolean]"
+    },
     "enable_ntlm_authentication": {
       "description": "Configures OMI listener for NTLM / SPNEGO auth. Default is to enable",
       "type": "Optional[Boolean]"
