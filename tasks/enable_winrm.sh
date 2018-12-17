@@ -38,7 +38,7 @@ if [ "$PT_build_omi" = true ] ; then
   ./configure --enable-system-build --enable-native-kits
   make
 
-  OMI_PKG=/tmp/Build-omi/omi/Unix/output_openssl_1.1.0/release/omi-1.4.3-*.ssl_110.ulinux.x64.deb
+  OMI_PKG=/tmp/Build-omi/omi/Unix/output_openssl_1.1.0/release/omi-1.6.0-*.ssl_110.ulinux.x64.deb
 else
   OMI_PKG=omi-1.5.0-0.ssl_110.ulinux.x64.deb
 
