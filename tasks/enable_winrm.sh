@@ -34,9 +34,8 @@ if [ "$PT_build_omi" = true ] ; then
   git clone https://github.com/Microsoft/pal
   git submodule foreach git checkout master
 
-  # Build OMI master without openssl 0.9.8 packages
   cd /tmp/Build-omi/omi/Unix
-  ./configure --enable-system-build --enable-native-kits --disable-ssl-0.9.8
+  ./configure --enable-system-build --enable-native-kits
   make
 
   OMI_PKG=/tmp/Build-omi/omi/Unix/output_openssl_1.1.0/release/omi-1.4.3-*.ssl_110.ulinux.x64.deb
